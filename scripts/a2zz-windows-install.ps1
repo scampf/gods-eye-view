@@ -24,18 +24,6 @@ function Stop-WithMessage([string]$Text) {
     exit 1
 }
 
-function Test-TcpPort([string]$HostName, [int]$Port, [int]$TimeoutMs = 500) {
-    $client = New-Object System.Net.Sockets.TcpClient
-    try {
-        $async = $client.BeginConnect($HostName, $Port, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
-        $client.EndConnect($async)
-        return $true
-    }
-    catch { return $false }
-    finally { $client.Close() }
-}
-
 try {
     if ($env:OS -ne 'Windows_NT') { throw 'This installer is for Windows only.' }
     if (-not [Environment]::Is64BitOperatingSystem) { throw 'A 64-bit Windows installation is required.' }
@@ -62,8 +50,7 @@ try {
             throw "Node.js download failed SHA-256 verification. Expected $NodeSha256, got $actualHash."
         }
 
-        $oldNodeDir = Join-Path $InstallRoot "node-v$NodeVersion-win-x64"
-        Remove-Item $oldNodeDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $NodeDir -Recurse -Force -ErrorAction SilentlyContinue
         Expand-Archive -LiteralPath $nodeZip -DestinationPath $InstallRoot -Force
         Remove-Item $nodeZip -Force -ErrorAction SilentlyContinue
     }
@@ -131,51 +118,53 @@ try {
     $escapedNodeDir = $NodeDir.Replace("'", "''")
     $escapedAppDir = $AppDir.Replace("'", "''")
     $escapedNpmCmd = $npmCmd.Replace("'", "''")
-    $startContents = @"
-`$ErrorActionPreference = 'Stop'
-`$nodeDir = '$escapedNodeDir'
-`$appDir = '$escapedAppDir'
-`$npmCmd = '$escapedNpmCmd'
-`$url = '$Url'
-`$env:Path = "`$nodeDir;`$env:Path"
+    $startTemplate = @'
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$nodeDir = '__NODEDIR__'
+$appDir = '__APPDIR__'
+$npmCmd = '__NPMCMD__'
+$url = 'http://localhost:4173'
+$env:Path = "$nodeDir;$env:Path"
 
 function Test-GevPort {
-    `$client = New-Object System.Net.Sockets.TcpClient
+    $client = New-Object System.Net.Sockets.TcpClient
     try {
-        `$async = `$client.BeginConnect('127.0.0.1', 4173, `$null, `$null)
-        if (-not `$async.AsyncWaitHandle.WaitOne(500, `$false)) { return `$false }
-        `$client.EndConnect(`$async)
-        return `$true
+        $async = $client.BeginConnect('127.0.0.1', 4173, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne(500, $false)) { return $false }
+        $client.EndConnect($async)
+        return $true
     }
-    catch { return `$false }
-    finally { `$client.Close() }
+    catch { return $false }
+    finally { $client.Close() }
 }
 
 if (Test-GevPort) {
-    Start-Process `$url
+    Start-Process $url
     exit 0
 }
 
-if (-not (Test-Path `$npmCmd) -or -not (Test-Path `$appDir)) {
+if (-not (Test-Path $npmCmd) -or -not (Test-Path $appDir)) {
     [System.Windows.Forms.MessageBox]::Show("God's Eye View installation files are missing. Run INSTALL_WINDOWS.bat again.", "God's Eye View") | Out-Null
     exit 1
 }
 
-`$server = Start-Process -FilePath `$env:ComSpec -ArgumentList @('/k', "```"`$npmCmd```" run dev") -WorkingDirectory `$appDir -PassThru
+$cmdLine = '""{0}" run dev"' -f $npmCmd
+$server = Start-Process -FilePath $env:ComSpec -ArgumentList @('/k', $cmdLine) -WorkingDirectory $appDir -PassThru
 
-for (`$i = 0; `$i -lt 90; `$i++) {
+for ($i = 0; $i -lt 90; $i++) {
     Start-Sleep -Seconds 1
     if (Test-GevPort) {
-        Start-Process `$url
+        Start-Process $url
         exit 0
     }
-    if (`$server.HasExited) { break }
+    if ($server.HasExited) { break }
 }
 
-Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.MessageBox]::Show("The local server did not open on port 4173. Leave the server window open and send ChatGPT a screenshot of the error shown there.", "God's Eye View - startup problem") | Out-Null
 exit 1
-"@
+'@
+    $startContents = $startTemplate.Replace('__NODEDIR__', $escapedNodeDir).Replace('__APPDIR__', $escapedAppDir).Replace('__NPMCMD__', $escapedNpmCmd)
     Set-Content -LiteralPath $StartScript -Value $startContents -Encoding UTF8
 
     $desktop = [Environment]::GetFolderPath('Desktop')
